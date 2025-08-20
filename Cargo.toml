@@ -1,0 +1,26 @@
+[package]
+name = "komoswitch"
+version = "0.1.0"
+edition = "2024"
+
+
+[dependencies]
+anyhow = "1.0.99"
+env_logger = "0.11.8"
+log = "0.4.27"
+windows = { version = "0.61.3", features = [
+  "Win32_Graphics_Gdi",
+  "Win32_System_LibraryLoader",
+  "Win32_UI_WindowsAndMessaging",
+  "UI_ViewManagement"
+] }
+winsafe = { version = "0.0.25", features = ["user", "gdi"] }
+komorebi-client = { git = "https://github.com/LGUG2Z/komorebi", tag = "v0.1.37"}
+serde_json = "1.0.143"
+serde = "1.0.219"
+parking_lot = "0.12.4"
+
+# New binary 
+[[bin]]
+name = "komotest"
+path = "src/main2.rs"
