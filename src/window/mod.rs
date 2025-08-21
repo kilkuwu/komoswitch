@@ -162,7 +162,8 @@ impl Window {
         self.settings = Settings::new()?;
         self.hwnd
             .SetLayeredWindowAttributes(self.settings.colors.get_color_key(), 0, co::LWA::COLORKEY)?;
-        self.hwnd.InvalidateRect(None, false)?;
+        self.resize_to_fit()?;
+        self.hwnd.InvalidateRect(None, true)?;
         Ok(0)
     }
 
@@ -211,7 +212,7 @@ impl Window {
             if self.workspaces.name_changed() {
                 self.resize_to_fit()?;
             }
-            self.hwnd.InvalidateRect(None, false)?;
+            self.hwnd.InvalidateRect(None, true)?;
         }
         // Here you can implement the logic to update the window based on the new workspaces.
         // For example, you might want to redraw the window or update some internal state.
