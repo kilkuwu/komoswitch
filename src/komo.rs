@@ -1,11 +1,8 @@
-use std::io::{BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::time::Duration;
 
 use anyhow::Context;
-use komorebi_client::{
-    Notification, NotificationEvent, SocketMessage, State,
-    WindowManagerEvent,
-};
+use komorebi_client::{Notification, NotificationEvent, SocketMessage, State, WindowManagerEvent};
 use winsafe::HWND;
 
 use crate::msgs::UpdateWorkspaces;
@@ -41,7 +38,7 @@ fn workspaces_from_state(state: State) -> anyhow::Result<Vec<Workspace>> {
         Workspace {
             name,
             // idx,
-            state
+            state,
         }
     });
 
@@ -105,72 +102,46 @@ pub fn listen_for_workspaces(hwnd: HWND) -> anyhow::Result<()> {
         };
         log::debug!("Client acquired");
 
-        let mut buffer = Vec::new();
-        let mut reader = BufReader::new(client);
+        let reader = BufReader::new(client.try_clone()?);
         log::debug!("buffer reader acquired");
 
-        // this is when we know a shutdown has been sent
-        if matches!(reader.read_to_end(&mut buffer), Ok(0)) {
-            log::debug!("Disconnected from komorebi");
-            std::thread::sleep(Duration::from_secs(30));
+        for line in reader.lines().flatten() {
+            log::debug!("Read line from komorebi");
 
-            // keep trying to reconnect to komorebi
-            let connect_message = SocketMessage::AddSubscriberSocket(SOCK_NAME.into());
-            while let Err(e) = komorebi_client::send_message(&connect_message) {
-                log::debug!("Failed to reconnect to komorebi: {e}");
-                std::thread::sleep(Duration::from_secs(1));
-            }
+            let Ok(notification) = serde_json::from_str::<Notification>(&line) else {
+                log::error!("Discarding malformed notification from komorebi");
+                continue;
+            };
 
-            log::debug!("Reconnected to komorebi");
+            log::debug!("Finished receiving notification");
 
-            continue;
-        }
+            let should_update = match notification.event {
+                NotificationEvent::Socket(notif) if should_update_sm(&notif) => true,
+                NotificationEvent::WindowManager(notif) if should_update_wme(&notif) => true,
+                _ => false,
+            };
+            log::debug!("Should update: {}", should_update);
 
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&buffer) else {
-            log::error!("Failed to parse JSON from komorebi");
-            continue;
-        };
-
-        log::debug!(
-            "Received an event from komorebi: {}",
-            value
-                .get("event")
-                .and_then(|o| o.as_object())
-                .and_then(|o| o.get("type"))
-                .map(|v| v.to_string())
-                .unwrap_or_default()
-        );
-
-        let Ok(notification) = serde_json::from_value::<Notification>(value) else {
-            log::error!("Failed to parse notification from komorebi");
-            continue;
-        };
-
-        log::debug!("Received notification");
-
-        let should_update = match notification.event {
-            NotificationEvent::Socket(notif) if should_update_sm(&notif) => true,
-            NotificationEvent::WindowManager(notif) if should_update_wme(&notif) => true,
-            _ => false,
-        };
-        log::debug!("Should update: {}", should_update);
-
-        if !should_update {
-            log::debug!("Skipping update for this notification");
-            continue;
-        }
-
-        let new_workspaces = match workspaces_from_state(notification.state) {
-            Ok(workspaces) => workspaces,
-            Err(e) => {
-                log::error!("Failed to read workspaces from state: {e}");
+            if !should_update {
+                log::debug!("Skipping update for this notification");
                 continue;
             }
-        };
 
-        unsafe { hwnd.PostMessage(UpdateWorkspaces::to_wmdmsg(new_workspaces))?; }
+            let new_workspaces = match workspaces_from_state(notification.state) {
+                Ok(workspaces) => workspaces,
+                Err(e) => {
+                    log::error!("Failed to read workspaces from state: {e}");
+                    continue;
+                }
+            };
 
-        log::debug!("Updated workspaces");
+            unsafe {
+                hwnd.PostMessage(UpdateWorkspaces::to_wmdmsg(new_workspaces))?;
+            }
+
+            log::debug!("Updated workspaces");
+        }
+        log::debug!("Done read lines")
     }
 
     log::debug!("Exiting komorebi listener loop");

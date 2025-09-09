@@ -84,7 +84,7 @@ impl Window {
         unsafe {
             // The hwnd member is saved in WM_NCCREATE message
             HWND::CreateWindowEx(
-                co::WS_EX::NOACTIVATE | co::WS_EX::LAYERED,
+                co::WS_EX::NOACTIVATE | co::WS_EX::LAYERED | co::WS_EX::TOOLWINDOW | co::WS_EX::TOPMOST,
                 AtomStr::Atom(class_name),
                 None,
                 co::WS::VISIBLE | co::WS::CLIPSIBLINGS | co::WS::POPUP,
@@ -102,6 +102,7 @@ impl Window {
 
     extern "system" fn wnd_proc(hwnd: HWND, msg: co::WM, wparam: usize, lparam: isize) -> isize {
         let wm_any = msg::WndMsg::new(msg, wparam, lparam);
+        
         let ptr_self = match msg {
             co::WM::NCCREATE => {
                 let msg = unsafe { msg::wm::NcCreate::from_generic_wm(wm_any) };
@@ -142,9 +143,14 @@ impl Window {
     fn handle_message(&mut self, p: msg::WndMsg) -> anyhow::Result<isize> {
         // log::debug!("Received message: {:#?}", p);
         const SETTINGCHANGED: co::WM = unsafe { co::WM::from_raw(WM_SETTINGCHANGE)};
+        // if p.msg_id == co::WM::RBUTTONDOWN {
+        //     log::debug!("Found WM_RBUTTONDOWN message");
+        //     // return self.handle_rbuttondown(unsafe { msg::wm::RButtonDown::from_generic_wm(p) });
+        // }
         match p.msg_id {
             co::WM::CREATE => self.handle_create(),
             co::WM::PAINT => self.handle_paint(),
+            co::WM::LBUTTONDOWN => self.handle_lbuttondown(unsafe { msg::wm::RButtonDown::from_generic_wm(p) }),
             UpdateWorkspaces::ID => self.handle_update_workspaces(UpdateWorkspaces::from_wndmsg(p)),
             SETTINGCHANGED => self.handle_setting_changed(),
             co::WM::DESTROY => {
@@ -153,6 +159,15 @@ impl Window {
             },
             _ => Ok(unsafe { self.hwnd.DefWindowProc(p) }),
         }
+    }
+
+    fn handle_lbuttondown(&mut self, p: msg::wm::RButtonDown) -> anyhow::Result<isize> {
+        log::debug!("Handling WM_LBUTTONDOWN message");
+        // Here you can implement the logic to handle right-click events.
+        // For example, you might want to show a context menu or perform some action.
+        log::info!("Left button clicked at position: {} {}", p.coords.x, p.coords.y);
+        // You can return 0 to indicate that the message has been handled.
+        Ok(0)
     }
 
     fn handle_setting_changed(&mut self) -> anyhow::Result<isize> {
@@ -239,7 +254,9 @@ impl Window {
         hdc.SetBkMode(co::BKMODE::TRANSPARENT)?;
         let _old_font = hdc.SelectObject(&self.settings.font)?;
 
-        let name_changed = self.workspaces.name_changed();
+        // let name_changed = self.workspaces.name_changed();
+        let name_changed = true;
+        
         let mut left = 0;
         for workspace in &self.workspaces.data {
             let sz = hdc.GetTextExtentPoint32(&workspace.data.name)?;
@@ -341,13 +358,18 @@ impl Window {
         let taskbar = HWND::FindWindow(Some(taskbar_atom), None)?
             .ok_or(anyhow::anyhow!("Taskbar not found"))?;
 
+        taskbar.EnumChildWindows(|c| {
+            log::info!("Child window: {:?}", c.GetClassName());
+            true
+        });
+
         let rect = taskbar.GetClientRect()?;
 
         self.create_window(
             atom,
             POINT { 
                 x: 15, 
-                y: 0
+                y: 0 
             },
             SIZE {
                 cx: self.get_window_width()?,
