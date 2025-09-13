@@ -5,7 +5,7 @@
   ),
   windows_subsystem = "windows"
 )]
-use crate::{komo::listen_for_workspaces, window::Window};
+use crate::{komo::start_listen_for_workspaces, window::Window};
 
 mod komo;
 mod window;
@@ -20,7 +20,7 @@ fn begin_execution() -> anyhow::Result<()> {
     window.prepare()?;
 
     let hwnd = unsafe { window.hwnd.raw_copy() };
-    std::thread::spawn(move || listen_for_workspaces(hwnd));
+    start_listen_for_workspaces(hwnd)?;
 
     window.run_loop()
 }

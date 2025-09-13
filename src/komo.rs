@@ -1,8 +1,11 @@
-use std::io::{BufRead, BufReader};
+use std::io::{BufReader, Read};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::Context;
-use komorebi_client::{Notification, NotificationEvent, SocketMessage, State, WindowManagerEvent};
+use komorebi_client::{
+    Notification, NotificationEvent, SocketMessage, State, SubscribeOptions, WindowManagerEvent,
+};
 use winsafe::HWND;
 
 use crate::msgs::UpdateWorkspaces;
@@ -57,69 +60,90 @@ const SOCK_NAME: &str = "komorebi-switcher-debug.sock";
 #[cfg(not(debug_assertions))]
 const SOCK_NAME: &str = "komorebi-switcher.sock";
 
-pub fn listen_for_workspaces(hwnd: HWND) -> anyhow::Result<()> {
+pub fn start_listen_for_workspaces(hwnd: HWND) -> anyhow::Result<JoinHandle<()>> {
     let socket = loop {
-        match komorebi_client::subscribe(SOCK_NAME) {
+        match komorebi_client::subscribe_with_options(
+            SOCK_NAME,
+            SubscribeOptions {
+                filter_state_changes: true,
+            },
+        ) {
             Ok(socket) => break socket,
             Err(_) => std::thread::sleep(Duration::from_secs(1)),
         };
     };
 
-    log::debug!("Listenting for messages from komorebi");
+    log::info!("Subscribed to komorebi events");
 
-    for client in socket.incoming() {
-        log::debug!("New loop for socket client {client:?}");
-        log::error!("Testing error handling");
-        let client = match client {
-            Ok(client) => client,
-            Err(e) => {
-                if e.raw_os_error().expect("could not get raw os error") == 109 {
-                    log::warn!("komorebi is no longer running");
+    let handle = std::thread::spawn(move || {
+        log::debug!("Listenting for messages from komorebi");
 
-                    let mut output = std::process::Command::new("cmd.exe")
-                        .args(["/C", "komorebic.exe", "subscribe-socket", SOCK_NAME])
-                        .output()?;
+        for client in socket.incoming() {
+            log::debug!("New loop for socket client {client:?}");
 
-                    while !output.status.success() {
-                        log::warn!(
-                            "komorebic.exe failed with error code {:?}, retrying in 5 seconds...",
-                            output.status.code()
-                        );
-
-                        std::thread::sleep(Duration::from_secs(5));
-
-                        output = std::process::Command::new("cmd.exe")
-                            .args(["/C", "komorebic.exe", "subscribe-socket", SOCK_NAME])
-                            .output()?;
-                    }
-
-                    log::warn!("reconnected to komorebi");
-                } else {
-                    log::error!("Error while receiving a client from komorebi: {e}");
+            let client = match client {
+                Ok(client) => client,
+                Err(e) => {
+                    log::error!("Failed to get komorebi event subscription: {e}");
+                    continue;
                 }
+            };
+            log::debug!("Client acquired");
+
+            if let Err(error) = client.set_read_timeout(Some(Duration::from_secs(1))) {
+                log::error!("Error when setting read timeout: {}", error)
+            }
+
+            log::debug!("Read timeout set");
+
+            let mut buffer = Vec::new();
+            let mut reader = BufReader::new(client);
+
+            // this is when we know a shutdown has been sent
+            if matches!(reader.read_to_end(&mut buffer), Ok(0)) {
+                log::info!("disconnected from komorebi");
+
+                // keep trying to reconnect to komorebi
+                while komorebi_client::send_message(&SocketMessage::AddSubscriberSocket(
+                    SOCK_NAME.to_string(),
+                ))
+                .is_err()
+                {
+                    log::info!("Attempting to reconnect to komorebi");
+                    std::thread::sleep(Duration::from_secs(2));
+                }
+
+                log::info!("reconnected to komorebi");
                 continue;
             }
-        };
-        log::debug!("Client acquired");
 
-        let reader = BufReader::new(client.try_clone()?);
-        log::debug!("buffer reader acquired");
+            log::debug!("Read {} bytes from komorebi", buffer.len());
 
-        for line in reader.lines().flatten() {
-            log::debug!("Read line from komorebi");
-
-            let Ok(notification) = serde_json::from_str::<Notification>(&line) else {
-                log::error!("Discarding malformed notification from komorebi");
-                continue;
+            let notification_str = match String::from_utf8(buffer) {
+                Ok(notification_str) => 
+                    notification_str,
+                Err(e) => {
+                    log::error!("Failed to parse komorebi notification string as utf8: {e}");
+                    continue;
+                }
             };
 
-            log::debug!("Finished receiving notification");
+            let notification = match serde_json::from_str::<Notification>(&notification_str) {
+                Ok(notification) => notification,
+                Err(e) => {
+                    log::error!("Failed to parse komorebi notification string as json: {e}");
+                    continue;
+                }
+            };
+
+            log::info!("Received notification from komorebi: {:?}", notification.event);
 
             let should_update = match notification.event {
                 NotificationEvent::Socket(notif) if should_update_sm(&notif) => true,
                 NotificationEvent::WindowManager(notif) if should_update_wme(&notif) => true,
                 _ => false,
             };
+
             log::debug!("Should update: {}", should_update);
 
             if !should_update {
@@ -136,17 +160,17 @@ pub fn listen_for_workspaces(hwnd: HWND) -> anyhow::Result<()> {
             };
 
             unsafe {
-                hwnd.PostMessage(UpdateWorkspaces::to_wmdmsg(new_workspaces))?;
+                hwnd.PostMessage(UpdateWorkspaces::to_wmdmsg(new_workspaces))
+                    .ok();
             }
 
-            log::debug!("Updated workspaces");
+            log::debug!("Posted message to update workspaces");
         }
-        log::debug!("Done read lines")
-    }
 
-    log::debug!("Exiting komorebi listener loop");
+        log::debug!("Exiting komorebi listener loop");
+    });
 
-    Ok(())
+    Ok(handle)
 }
 
 fn should_update_wme(notif: &WindowManagerEvent) -> bool {

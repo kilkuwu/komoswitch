@@ -162,7 +162,7 @@ impl Window {
     }
 
     fn handle_lbuttondown(&mut self, p: msg::wm::RButtonDown) -> anyhow::Result<isize> {
-        log::debug!("Handling WM_LBUTTONDOWN message");
+        log::info!("Handling WM_LBUTTONDOWN message");
         // Here you can implement the logic to handle right-click events.
         // For example, you might want to show a context menu or perform some action.
         log::info!("Left button clicked at position: {} {}", p.coords.x, p.coords.y);
@@ -171,7 +171,7 @@ impl Window {
     }
 
     fn handle_setting_changed(&mut self) -> anyhow::Result<isize> {
-        log::debug!("Handling WM_SETTINGCHANGE message");
+        log::info!("Handling WM_SETTINGCHANGE message");
         // Here you can handle system settings changes, such as theme changes.
         // For example, you might want to update colors or fonts based on the new settings.
         self.settings = Settings::new()?;
@@ -235,14 +235,14 @@ impl Window {
     }
 
     fn handle_create(&self) -> anyhow::Result<isize> {
-        log::debug!("Handling WM_CREATE message");
+        log::info!("Handling WM_CREATE message");
         // Here you can perform any initialization needed when the window is created.
         // For example, setting up controls or initializing resources.
         Ok(0)
     }
 
     fn handle_paint(&self) -> anyhow::Result<isize> {
-        log::debug!("WM_PAINT event received");
+        log::info!("Handling WM_PAINT message");
 
         let hdc = self.hwnd.BeginPaint()?;
 
@@ -322,10 +322,7 @@ impl Window {
             left += sz.cx + TEXT_PADDING * 2; // move left for next workspace
         }
 
-        log::debug!("Drawn workspaces");
-        log::debug!("self workspaces lock() finished");
-        log::debug!("self settings lock() finished");
-        log::info!("WM_PAINT event processed");
+        log::info!("WM_PAINT event processed. Workspaces redrawn.");
         Ok(0)
     }
 
