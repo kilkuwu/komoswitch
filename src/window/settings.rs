@@ -12,6 +12,7 @@ pub struct ColorSettings {
     pub focused: COLORREF,
     pub empty: COLORREF,
     pub monocle: COLORREF,
+    pub maximized: COLORREF,
     pub foreground: COLORREF,
 }
 
@@ -56,11 +57,23 @@ impl ColorSettings {
             true => COLORREF::from_rgb(200, 200, 200), 
             false => COLORREF::from_rgb(50, 50, 50),  
         };
+
+        let monocle = match is_light_mode {
+            true => COLORREF::from_rgb(255, 135, 210),
+            false => COLORREF::from_rgb(225, 21, 123), 
+        };
+
+        let maximized = match is_light_mode {
+            true => COLORREF::from_rgb(180, 215, 215),
+            false => COLORREF::from_rgb(10, 102, 194),
+        };
+
         Ok(Self {
             nonempty,
             focused,
             empty,
-            monocle: COLORREF::from_rgb(225, 21, 123), 
+            monocle,
+            maximized,
             foreground,
         })
     }
