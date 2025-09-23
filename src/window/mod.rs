@@ -1,13 +1,13 @@
-use crate::{
-    msgs::UpdateWorkspaces,
-    window::settings::Settings,
-};
+use crate::{msgs::UpdateWorkspaces, window::settings::Settings};
 use komorebi_client::{DefaultLayout, Layout, Ring, SocketMessage, Workspace};
 use windows::Win32::UI::WindowsAndMessaging::WM_SETTINGCHANGE;
 use winsafe::{prelude::*, *};
 
 mod settings;
 
+seq_ids! {
+    ID_EXIT = 1001;
+}
 pub struct Window {
     pub hwnd: HWND,
     workspaces: Ring<Workspace>,
@@ -19,11 +19,11 @@ const TEXT_PADDING: i32 = 20; // Padding around text in pixels
 impl Window {
     pub fn new() -> anyhow::Result<Self> {
         Ok(Self {
-            hwnd: HWND::NULL, 
+            hwnd: HWND::NULL,
             workspaces: loop {
                 let Ok(new_workspaces) = crate::komo::read_workspaces() else {
                     log::error!("Failed to read workspaces, retrying...");
-                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    std::thread::sleep(std::time::Duration::from_secs(2));
                     continue;
                 };
                 break new_workspaces;
@@ -86,7 +86,6 @@ impl Window {
             panic!("Cannot create window twice.");
         }
 
-
         unsafe {
             // The hwnd member is saved in WM_NCCREATE message
             HWND::CreateWindowEx(
@@ -108,7 +107,6 @@ impl Window {
 
         Ok(())
     }
-
     extern "system" fn wnd_proc(hwnd: HWND, msg: co::WM, wparam: usize, lparam: isize) -> isize {
         let wm_any = msg::WndMsg::new(msg, wparam, lparam);
 
@@ -135,6 +133,7 @@ impl Window {
         let ref_self = unsafe { &mut *ptr_self };
 
         if msg == co::WM::NCDESTROY {
+            log::info!("HWND NCDESTROY: {:#?}", hwnd);
             unsafe {
                 ref_self.hwnd.SetWindowLongPtr(co::GWLP::USERDATA, 0); // clear passed pointer
             }
@@ -156,6 +155,10 @@ impl Window {
             co::WM::LBUTTONDOWN => {
                 self.handle_lbuttondown(unsafe { msg::wm::RButtonDown::from_generic_wm(p) })
             }
+            co::WM::RBUTTONDOWN => {
+                self.handle_rbuttondown(unsafe { msg::wm::RButtonDown::from_generic_wm(p) })
+            }
+            co::WM::COMMAND => self.handle_command(unsafe { msg::wm::Command::from_generic_wm(p) }),
             UpdateWorkspaces::ID => self.handle_update_workspaces(UpdateWorkspaces::from_wndmsg(p)),
             SETTINGCHANGED => self.handle_setting_changed(),
             co::WM::DESTROY => {
@@ -166,48 +169,51 @@ impl Window {
         }
     }
 
+    fn handle_command(&mut self, mut p: msg::wm::Command) -> anyhow::Result<isize> {
+        match p.event.ctrl_id() {
+            ID_EXIT => {
+                log::info!("Exiting application...");
+                unsafe {
+                    self.hwnd
+                        .PostMessage(msg::WndMsg::new(co::WM::CLOSE, 0, 0))?;
+                }
+                Ok(0)
+            }
+            _ => Ok(unsafe { self.hwnd.DefWindowProc(p.as_generic_wm()) }),
+        }
+    }
+
+    fn handle_rbuttondown(&mut self, p: msg::wm::RButtonDown) -> anyhow::Result<isize> {
+        log::info!("Handling WM_RBUTTONDOWN message");
+        log::info!("Cursor at: ({}, {})", p.coords.x, p.coords.y);
+        let mut menu = HMENU::CreatePopupMenu()?;
+        menu.append_item(&[winsafe::MenuItem::Entry {
+            cmd_id: ID_EXIT,
+            text: "Quit",
+        }])?;
+
+        menu.track_popup_menu_at_point(p.coords, &self.hwnd, &self.hwnd)?;
+        log::debug!("Menu displayed");
+        menu.DestroyMenu()?;
+        log::debug!("Menu destroyed");
+        Ok(0)
+    }
     fn handle_lbuttondown(&mut self, p: msg::wm::RButtonDown) -> anyhow::Result<isize> {
         log::info!("Handling WM_LBUTTONDOWN message");
-        // Here you can implement the logic to handle right-click events.
-        // For example, you might want to show a context menu or perform some action.
-        log::info!(
-            "Left button clicked at position: {} {}",
-            p.coords.x,
-            p.coords.y
-        );
         let mut left = 0;
-        // You can return 0 to indicate that the message has been handled.
         let hdc = self.hwnd.GetDC()?;
         let rect = self.hwnd.GetClientRect()?;
-
         let focused_idx = self.workspaces.focused_idx();
         for (idx, workspace) in self.workspaces.elements().iter().enumerate() {
             let workspace_name = workspace.name.clone().unwrap_or((idx + 1).to_string());
             let sz = hdc.GetTextExtentPoint32(&workspace_name)?;
 
-            let focused_rect = if focused_idx == idx {
-                RECT {
-                    left: left + 5,
-                    right: left + sz.cx + TEXT_PADDING * 2 - 5,
-                    top: rect.bottom - 20,
-                    bottom: rect.bottom - 10,
-                }
-            } else {
-                if workspace.is_empty() {
-                    RECT {
-                        left: left + 10,
-                        right: left + sz.cx + TEXT_PADDING * 2 - 10,
-                        top: rect.bottom - 20,
-                        bottom: rect.bottom - 10,
-                    }
-                } else {
-                    RECT {
-                        left: left + 10,
-                        right: left + sz.cx + TEXT_PADDING * 2 - 10,
-                        top: rect.bottom - 20,
-                        bottom: rect.bottom - 10,
-                    }
-                }
+            let h_padding = if focused_idx == idx { 5 } else { 10 };
+            let focused_rect = RECT {
+                left: left + h_padding,
+                right: left + sz.cx + TEXT_PADDING * 2 - h_padding,
+                top: rect.bottom - 20,
+                bottom: rect.bottom - 10,
             };
 
             if p.coords.x >= focused_rect.left && p.coords.x <= focused_rect.right {
@@ -216,15 +222,13 @@ impl Window {
                 break;
             }
 
-            left += sz.cx + TEXT_PADDING * 2; // move left for next workspace
+            left += sz.cx + TEXT_PADDING * 2;
         }
         Ok(0)
     }
 
     fn handle_setting_changed(&mut self) -> anyhow::Result<isize> {
         log::info!("Handling WM_SETTINGCHANGE message");
-        // Here you can handle system settings changes, such as theme changes.
-        // For example, you might want to update colors or fonts based on the new settings.
         self.settings = Settings::new()?;
         self.hwnd.SetLayeredWindowAttributes(
             self.settings.colors.get_color_key(),
@@ -237,7 +241,6 @@ impl Window {
     }
 
     fn paint_and_get_width(&self, hdc: &HDC, paint: bool) -> anyhow::Result<i32> {
-        // Clear the background with the transparency key color
         let _old_font = hdc.SelectObject(&self.settings.font)?;
 
         let rect = if paint {
@@ -253,7 +256,6 @@ impl Window {
             hdc.SetBkMode(co::BKMODE::TRANSPARENT)?;
         }
 
-        // border_radius for all rectangles
         const BORDER_RADIUS: SIZE = SIZE { cx: 10, cy: 10 };
 
         let mut left = 0;
@@ -276,72 +278,51 @@ impl Window {
                     co::DT::CENTER | co::DT::VCENTER | co::DT::SINGLELINE,
                 )?;
 
+                let h_padding = if focused_idx == idx { 5 } else { 10 };
+
                 let focused_rect = RECT {
-                    left: left + 5,
-                    right: left + sz.cx + TEXT_PADDING * 2 - 5,
+                    left: left + h_padding,
+                    right: left + sz.cx + TEXT_PADDING * 2 - h_padding,
                     top: rect.bottom - 20,
                     bottom: rect.bottom - 10,
                 };
 
-                if focused_idx == idx {
-                    let focused_brush = HBRUSH::CreateSolidBrush(self.settings.colors.focused)?;
-                    let _old_brush = hdc.SelectObject(&*focused_brush);
-                    hdc.RoundRect(focused_rect, BORDER_RADIUS)?;
+                let focused_brush = HBRUSH::CreateSolidBrush(if focused_idx == idx {
+                    self.settings.colors.focused
+                } else if workspace.is_empty() {
+                    self.settings.colors.empty
                 } else {
-                    let focused_rect = RECT {
-                        left: left + 10,
-                        right: left + sz.cx + TEXT_PADDING * 2 - 10,
-                        top: rect.bottom - 20,
-                        bottom: rect.bottom - 10,
-                    };
-                    if workspace.is_empty() {
-                        let empty_brush = HBRUSH::CreateSolidBrush(self.settings.colors.empty)?;
-                        let _old_brush = hdc.SelectObject(&*empty_brush);
-                        hdc.RoundRect(focused_rect, BORDER_RADIUS)?;
-                    } else {
-                        let nonempty_brush =
-                            HBRUSH::CreateSolidBrush(self.settings.colors.nonempty)?;
-                        let _old_brush = hdc.SelectObject(&*nonempty_brush);
-                        hdc.RoundRect(focused_rect, BORDER_RADIUS)?;
+                    self.settings.colors.nonempty
+                })?;
+                let _old_brush = hdc.SelectObject(&*focused_brush);
+                hdc.RoundRect(focused_rect, BORDER_RADIUS)?;
+            }
+
+            left += sz.cx + TEXT_PADDING * 2;
+        }
+
+        if let Some(cw) = self.workspaces.focused() {
+            let mut current_state = String::new();
+
+            if let Some(hwnd) = komorebi_client::WindowsApi::foreground_window().ok() {
+                if let Some(window) = cw.maximized_window() {
+                    if hwnd == window.hwnd {
+                        current_state = "Maximized".to_string();
+                    }
+                }
+                if let Some(container) = cw.monocle_container() {
+                    if container.contains_window(hwnd) {
+                        current_state = "Monocle".to_string();
                     }
                 }
             }
 
-            left += sz.cx + TEXT_PADDING * 2; // move left for next workspace
-        }
-
-        // we are done with the thing, now
-        if let Some(current_workspace) = self.workspaces.focused() {
-            let get_current_state = |w: &Workspace| -> String {
-                if let Some(hwnd) = komorebi_client::WindowsApi::foreground_window().ok() {
-                    if let Some(window) = w.maximized_window() {
-                        if hwnd == window.hwnd {
-                            return "Maximized".to_string();
-                        }
-                    }
-
-                    if let Some(container) = w.monocle_container() {
-                        if container.contains_window(hwnd) {
-                            return "Monocle".to_string();
-                        }
-                    }
-                }
-
-                String::new()
-            };
-
-            let current_state = get_current_state(current_workspace);
-
             if current_state.is_empty() {
-                if matches!(
-                    current_workspace.layout,
-                    Layout::Default(DefaultLayout::Scrolling)
-                ) {
-                    log::debug!("Current workspace is in Scrolling layout");
-                    let focused_idx = current_workspace.containers.focused_idx();
-                    let total_containers = current_workspace.containers().len();
+                if matches!(cw.layout, Layout::Default(DefaultLayout::Scrolling)) {
+                    let focused_idx = cw.containers.focused_idx();
+                    let total_containers = cw.containers().len();
 
-                    if total_containers > 0 {
+                    if total_containers > 1 {
                         let draw_small_box = |text: &String,
                                               padding: i32,
                                               bg_color: COLORREF,
@@ -376,38 +357,36 @@ impl Window {
 
                         left += TEXT_PADDING;
 
-                        // if focused_idx > 1 {
-                        // we will draw 3 dots
-                        draw_small_box(
-                            &(if focused_idx > 1 {
-                                "•".to_string()
-                            } else {
-                                "".to_string()
-                            }),
-                            0,
-                            self.settings.colors.get_color_key(),
-                            &mut left,
-                            20,
-                        )?;
-                        // }
-                        // if focused_idx > 0 {
-                        draw_small_box(
-                            &(if focused_idx > 0 {
-                                (focused_idx).to_string()
-                            } else {
-                                "".to_string()
-                            }),
-                            12,
-                            if focused_idx > 0 {
-                                self.settings.colors.empty
-                            } else {
-                                self.settings.colors.get_color_key()
-                            },
-                            &mut left,
-                            16,
-                        )?;
-                        // }
-                        // if total_containers > 0 {
+                        if total_containers >= 3 {
+                            draw_small_box(
+                                &(if focused_idx > 1 {
+                                    "•".to_string()
+                                } else {
+                                    "".to_string()
+                                }),
+                                0,
+                                self.settings.colors.get_color_key(),
+                                &mut left,
+                                20,
+                            )?;
+                        }
+                        if total_containers > 2 || (total_containers == 2 && focused_idx == 1) {
+                            draw_small_box(
+                                &(if focused_idx > 0 {
+                                    (focused_idx).to_string()
+                                } else {
+                                    "".to_string()
+                                }),
+                                12,
+                                if focused_idx > 0 {
+                                    self.settings.colors.empty
+                                } else {
+                                    self.settings.colors.get_color_key()
+                                },
+                                &mut left,
+                                16,
+                            )?;
+                        }
                         draw_small_box(
                             &(focused_idx + 1).to_string(),
                             16,
@@ -415,39 +394,36 @@ impl Window {
                             &mut left,
                             14,
                         )?;
-                        // }
-
-                        // if focused_idx + 1 < total_containers {
-                        draw_small_box(
-                            &(if focused_idx + 1 < total_containers {
-                                (focused_idx + 2).to_string()
-                            } else {
-                                "".to_string()
-                            }),
-                            12,
-                            if focused_idx + 1 < total_containers {
-                                self.settings.colors.empty
-                            } else {
-                                self.settings.colors.get_color_key()
-                            },
-                            &mut left,
-                            16,
-                        )?;
-                        // }
-                        // if focused_idx + 2 < total_containers {
-                        // we will draw 3 dots
-                        draw_small_box(
-                            &(if focused_idx + 2 < total_containers {
-                                "•".to_string()
-                            } else {
-                                "".to_string()
-                            }),
-                            0,
-                            self.settings.colors.get_color_key(),
-                            &mut left,
-                            20,
-                        )?;
-                        // }
+                        if total_containers >= 2 {
+                            draw_small_box(
+                                &(if focused_idx + 1 < total_containers {
+                                    (focused_idx + 2).to_string()
+                                } else {
+                                    "".to_string()
+                                }),
+                                12,
+                                if focused_idx + 1 < total_containers {
+                                    self.settings.colors.empty
+                                } else {
+                                    self.settings.colors.get_color_key()
+                                },
+                                &mut left,
+                                16,
+                            )?;
+                        }
+                        if total_containers >= 3 {
+                            draw_small_box(
+                                &(if focused_idx + 2 < total_containers {
+                                    "•".to_string()
+                                } else {
+                                    "".to_string()
+                                }),
+                                0,
+                                self.settings.colors.get_color_key(),
+                                &mut left,
+                                20,
+                            )?;
+                        }
                     }
                 }
             } else {
@@ -524,15 +500,15 @@ impl Window {
     }
 
     fn handle_paint(&self) -> anyhow::Result<isize> {
-        log::debug!("Handling WM_PAINT message...");
+        log::info!("Handling WM_PAINT message...");
         let hdc = self.hwnd.BeginPaint()?;
         self.paint_and_get_width(&*hdc, true)?;
-        log::debug!("WM_PAINT handled.");
+        log::info!("WM_PAINT handled.");
         Ok(0)
     }
 
     fn cleanup(&mut self) {
-        self.hwnd = HWND::NULL; 
+        self.hwnd = HWND::NULL;
     }
 
     pub fn run_loop(&self) -> anyhow::Result<()> {
@@ -559,28 +535,18 @@ impl Window {
         let taskbar_atom = AtomStr::from_str("Shell_TrayWnd");
         let taskbar = HWND::FindWindow(Some(taskbar_atom), None)?
             .ok_or(anyhow::anyhow!("Taskbar not found"))?;
-        log::debug!("Taskbar HWND found: {:#?}", taskbar);
 
         let rect = taskbar.GetClientRect()?;
-        log::debug!(
-            "Taskbar rect: {} {} {} {}",
-            rect.left,
-            rect.top,
-            rect.right,
-            rect.bottom
-        );
 
         self.create_window(
             atom,
             POINT { x: 15, y: 0 },
             SIZE {
                 cx: self.get_window_width()?,
-                cy: rect.bottom - rect.top, 
+                cy: rect.bottom - rect.top,
             },
             &hinstance,
         )?;
-
-        log::debug!("Window created, setting parent to taskbar");
 
         self.hwnd.SetParent(&taskbar)?;
 

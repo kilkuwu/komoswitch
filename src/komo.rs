@@ -8,48 +8,15 @@ use winsafe::HWND;
 
 use crate::msgs::UpdateWorkspaces;
 
-// #[derive(Debug, Clone, PartialEq)]
-// pub enum WorkspaceState {
-//     Empty,
-//     NonEmpty,
-//     Focused,
-// }
-
-// #[derive(Debug, Clone, PartialEq)]
-// pub struct Workspace {
-//     pub workspace: komorebi_client::Workspace,
-//     pub state: WorkspaceState,
-// }
-
 fn workspaces_from_state(
     state: State,
 ) -> anyhow::Result<Ring<Workspace>> {
     let monitor = state.monitors.focused().context("No focused monintor?")?;
 
-    // let focused_workspace = monitor.focused_workspace_idx();
-
     Ok(monitor.workspaces.clone())
-
-    // let workspaces = monitor.workspaces().iter().enumerate()
-    // .map(|(idx, w)| {
-    //     let state = if focused_workspace == idx {
-    //         WorkspaceState::Focused
-    //     } else if w.is_empty() {
-    //         WorkspaceState::Empty
-    //     } else {
-    //         WorkspaceState::NonEmpty
-    //     };
-    //     Workspace {
-    //         workspace: w.clone(),
-    //         state,
-    //     }
-    // });
-
-    // Ok(workspaces.collect())
 }
 
 pub fn read_workspaces() -> anyhow::Result<Ring<Workspace>> {
-    log::debug!("Reading komorebi workspaces");
     let response = komorebi_client::send_query(&SocketMessage::State)?;
     let state: State = serde_json::from_str(&response)?;
     workspaces_from_state(state)
@@ -76,11 +43,9 @@ pub fn start_listen_for_workspaces(hwnd: HWND) -> anyhow::Result<JoinHandle<()>>
     log::info!("Subscribed to komorebi events");
 
     let handle = std::thread::spawn(move || {
-        log::debug!("Listenting for messages from komorebi");
+        log::debug!("Listenting for messages from komorebi...");
 
         for client in socket.incoming() {
-            log::debug!("New loop for socket client {client:?}");
-
             let client = match client {
                 Ok(client) => client,
                 Err(e) => {
@@ -88,20 +53,17 @@ pub fn start_listen_for_workspaces(hwnd: HWND) -> anyhow::Result<JoinHandle<()>>
                     continue;
                 }
             };
-            log::debug!("Client acquired");
 
             if let Err(error) = client.set_read_timeout(Some(Duration::from_secs(1))) {
                 log::error!("Error when setting read timeout: {}", error)
             }
-
-            log::debug!("Read timeout set");
 
             let mut buffer = Vec::new();
             let mut reader = BufReader::new(client);
 
             // this is when we know a shutdown has been sent
             if matches!(reader.read_to_end(&mut buffer), Ok(0)) {
-                log::info!("disconnected from komorebi");
+                log::info!("Disconnected from komorebi!");
 
                 // keep trying to reconnect to komorebi
                 while komorebi_client::send_message(&SocketMessage::AddSubscriberSocket(
@@ -109,15 +71,13 @@ pub fn start_listen_for_workspaces(hwnd: HWND) -> anyhow::Result<JoinHandle<()>>
                 ))
                 .is_err()
                 {
-                    log::info!("Attempting to reconnect to komorebi");
-                    std::thread::sleep(Duration::from_secs(2));
+                    log::info!("Attempting to reconnect to komorebi...");
+                    std::thread::sleep(Duration::from_secs(3));
                 }
 
-                log::info!("reconnected to komorebi");
+                log::info!("Reconnected to komorebi!");
                 continue;
             }
-
-            log::debug!("Read {} bytes from komorebi", buffer.len());
 
             let notification_str = match String::from_utf8(buffer) {
                 Ok(notification_str) => notification_str,
@@ -157,8 +117,6 @@ pub fn start_listen_for_workspaces(hwnd: HWND) -> anyhow::Result<JoinHandle<()>>
 
             log::debug!("Posted message to update workspaces");
         }
-
-        log::debug!("Exiting komorebi listener loop");
     });
 
     Ok(handle)
