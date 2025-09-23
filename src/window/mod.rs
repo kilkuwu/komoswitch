@@ -249,8 +249,9 @@ impl Window {
             RECT::default()
         };
 
+        let _old_pen = hdc.SelectObject(&self.settings.transparent_pen)?;
+
         if paint {
-            let _old_pen = hdc.SelectObject(&self.settings.transparent_pen)?;
             hdc.FillRect(rect, &self.settings.transparent_brush)?;
             hdc.SetTextColor(self.settings.colors.foreground)?;
             hdc.SetBkMode(co::BKMODE::TRANSPARENT)?;
@@ -390,7 +391,7 @@ impl Window {
                         draw_small_box(
                             &(focused_idx + 1).to_string(),
                             16,
-                            self.settings.colors.nonempty,
+                            self.settings.colors.monocle,
                             &mut left,
                             14,
                         )?;
@@ -438,7 +439,7 @@ impl Window {
 
                     let focused_brush =
                         HBRUSH::CreateSolidBrush(if current_state == "Maximized" {
-                            self.settings.colors.nonempty
+                            self.settings.colors.maximized
                         } else {
                             self.settings.colors.monocle
                         })?;
