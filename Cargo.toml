@@ -1,5 +1,6 @@
 [package]
 name = "komoswitch"
+description = "A lightweight native Windows workspace switcher widget for komorebi that integrates directly into the taskbar"
 version = "0.1.0"
 edition = "2024"
 
