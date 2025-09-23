@@ -1,8 +1,6 @@
 use komorebi_client::{Ring, Workspace};
 use winsafe::{co::WM, msg::WndMsg};
 
-// use crate::komo::Workspace;
-
 pub struct UpdateWorkspaces;
 
 impl UpdateWorkspaces {

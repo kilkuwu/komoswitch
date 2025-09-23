@@ -65,7 +65,6 @@ pub fn start_listen_for_workspaces(hwnd: HWND) -> anyhow::Result<JoinHandle<()>>
             if matches!(reader.read_to_end(&mut buffer), Ok(0)) {
                 log::info!("Disconnected from komorebi!");
 
-                // keep trying to reconnect to komorebi
                 while komorebi_client::send_message(&SocketMessage::AddSubscriberSocket(
                     SOCK_NAME.to_string(),
                 ))
@@ -99,8 +98,6 @@ pub fn start_listen_for_workspaces(hwnd: HWND) -> anyhow::Result<JoinHandle<()>>
                 "Received notification from komorebi: {:?}",
                 notification.event
             );
-
-            // Always update because we have filtered state changes
 
             let new_workspaces = match workspaces_from_state(notification.state) {
                 Ok(workspaces) => workspaces,
