@@ -1,9 +1,8 @@
 use crate::{
-    komo::{Workspace, WorkspaceState},
     msgs::UpdateWorkspaces,
-    window::settings::{Settings},
-    workspaces::Workspaces,
+    window::settings::Settings,
 };
+use komorebi_client::{DefaultLayout, Layout, Ring, SocketMessage, Workspace};
 use windows::Win32::UI::WindowsAndMessaging::WM_SETTINGCHANGE;
 use winsafe::{prelude::*, *};
 
@@ -11,7 +10,7 @@ mod settings;
 
 pub struct Window {
     pub hwnd: HWND,
-    workspaces: Workspaces,
+    workspaces: Ring<Workspace>,
     settings: Settings,
 }
 
@@ -20,8 +19,15 @@ const TEXT_PADDING: i32 = 20; // Padding around text in pixels
 impl Window {
     pub fn new() -> anyhow::Result<Self> {
         Ok(Self {
-            hwnd: HWND::NULL, // Initialize with NULL
-            workspaces: Workspaces::new(),
+            hwnd: HWND::NULL, 
+            workspaces: loop {
+                let Ok(new_workspaces) = crate::komo::read_workspaces() else {
+                    log::error!("Failed to read workspaces, retrying...");
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    continue;
+                };
+                break new_workspaces;
+            },
             settings: Settings::new()?,
         })
     }
@@ -30,7 +36,6 @@ impl Window {
         let mut wcx = WNDCLASSEX::default();
         wcx.lpfnWndProc = Some(Self::wnd_proc);
         wcx.hInstance = unsafe { hinst.raw_copy() };
-        // wcx.hbrBackground = unsafe { self.settings.transparent_brush.raw_copy() };
         wcx.hCursor = HINSTANCE::NULL
             .LoadCursor(IdIdcStr::Idc(co::IDC::ARROW))?
             .leak();
@@ -81,10 +86,14 @@ impl Window {
             panic!("Cannot create window twice.");
         }
 
+
         unsafe {
             // The hwnd member is saved in WM_NCCREATE message
             HWND::CreateWindowEx(
-                co::WS_EX::NOACTIVATE | co::WS_EX::LAYERED | co::WS_EX::TOOLWINDOW | co::WS_EX::TOPMOST,
+                co::WS_EX::NOACTIVATE
+                    | co::WS_EX::LAYERED
+                    | co::WS_EX::TOOLWINDOW
+                    | co::WS_EX::TOPMOST,
                 AtomStr::Atom(class_name),
                 None,
                 co::WS::VISIBLE | co::WS::CLIPSIBLINGS | co::WS::POPUP,
@@ -102,7 +111,7 @@ impl Window {
 
     extern "system" fn wnd_proc(hwnd: HWND, msg: co::WM, wparam: usize, lparam: isize) -> isize {
         let wm_any = msg::WndMsg::new(msg, wparam, lparam);
-        
+
         let ptr_self = match msg {
             co::WM::NCCREATE => {
                 let msg = unsafe { msg::wm::NcCreate::from_generic_wm(wm_any) };
@@ -124,7 +133,6 @@ impl Window {
         }
 
         let ref_self = unsafe { &mut *ptr_self };
-        // log::debug!("Dereferenced pointer to self");
 
         if msg == co::WM::NCDESTROY {
             unsafe {
@@ -141,22 +149,19 @@ impl Window {
     }
 
     fn handle_message(&mut self, p: msg::WndMsg) -> anyhow::Result<isize> {
-        // log::debug!("Received message: {:#?}", p);
-        const SETTINGCHANGED: co::WM = unsafe { co::WM::from_raw(WM_SETTINGCHANGE)};
-        // if p.msg_id == co::WM::RBUTTONDOWN {
-        //     log::debug!("Found WM_RBUTTONDOWN message");
-        //     // return self.handle_rbuttondown(unsafe { msg::wm::RButtonDown::from_generic_wm(p) });
-        // }
+        const SETTINGCHANGED: co::WM = unsafe { co::WM::from_raw(WM_SETTINGCHANGE) };
         match p.msg_id {
             co::WM::CREATE => self.handle_create(),
             co::WM::PAINT => self.handle_paint(),
-            co::WM::LBUTTONDOWN => self.handle_lbuttondown(unsafe { msg::wm::RButtonDown::from_generic_wm(p) }),
+            co::WM::LBUTTONDOWN => {
+                self.handle_lbuttondown(unsafe { msg::wm::RButtonDown::from_generic_wm(p) })
+            }
             UpdateWorkspaces::ID => self.handle_update_workspaces(UpdateWorkspaces::from_wndmsg(p)),
             SETTINGCHANGED => self.handle_setting_changed(),
             co::WM::DESTROY => {
                 PostQuitMessage(0);
                 Ok(0)
-            },
+            }
             _ => Ok(unsafe { self.hwnd.DefWindowProc(p) }),
         }
     }
@@ -165,8 +170,54 @@ impl Window {
         log::info!("Handling WM_LBUTTONDOWN message");
         // Here you can implement the logic to handle right-click events.
         // For example, you might want to show a context menu or perform some action.
-        log::info!("Left button clicked at position: {} {}", p.coords.x, p.coords.y);
+        log::info!(
+            "Left button clicked at position: {} {}",
+            p.coords.x,
+            p.coords.y
+        );
+        let mut left = 0;
         // You can return 0 to indicate that the message has been handled.
+        let hdc = self.hwnd.GetDC()?;
+        let rect = self.hwnd.GetClientRect()?;
+
+        let focused_idx = self.workspaces.focused_idx();
+        for (idx, workspace) in self.workspaces.elements().iter().enumerate() {
+            let workspace_name = workspace.name.clone().unwrap_or((idx + 1).to_string());
+            let sz = hdc.GetTextExtentPoint32(&workspace_name)?;
+
+            let focused_rect = if focused_idx == idx {
+                RECT {
+                    left: left + 5,
+                    right: left + sz.cx + TEXT_PADDING * 2 - 5,
+                    top: rect.bottom - 20,
+                    bottom: rect.bottom - 10,
+                }
+            } else {
+                if workspace.is_empty() {
+                    RECT {
+                        left: left + 10,
+                        right: left + sz.cx + TEXT_PADDING * 2 - 10,
+                        top: rect.bottom - 20,
+                        bottom: rect.bottom - 10,
+                    }
+                } else {
+                    RECT {
+                        left: left + 10,
+                        right: left + sz.cx + TEXT_PADDING * 2 - 10,
+                        top: rect.bottom - 20,
+                        bottom: rect.bottom - 10,
+                    }
+                }
+            };
+
+            if p.coords.x >= focused_rect.left && p.coords.x <= focused_rect.right {
+                log::info!("Switching to workspace {}: {}", idx, workspace_name);
+                komorebi_client::send_query(&SocketMessage::FocusWorkspaceNumber(idx))?;
+                break;
+            }
+
+            left += sz.cx + TEXT_PADDING * 2; // move left for next workspace
+        }
         Ok(0)
     }
 
@@ -175,24 +226,265 @@ impl Window {
         // Here you can handle system settings changes, such as theme changes.
         // For example, you might want to update colors or fonts based on the new settings.
         self.settings = Settings::new()?;
-        self.hwnd
-            .SetLayeredWindowAttributes(self.settings.colors.get_color_key(), 0, co::LWA::COLORKEY)?;
+        self.hwnd.SetLayeredWindowAttributes(
+            self.settings.colors.get_color_key(),
+            0,
+            co::LWA::COLORKEY,
+        )?;
         self.resize_to_fit()?;
         self.hwnd.InvalidateRect(None, true)?;
         Ok(0)
     }
 
+    fn paint_and_get_width(&self, hdc: &HDC, paint: bool) -> anyhow::Result<i32> {
+        // Clear the background with the transparency key color
+        let _old_font = hdc.SelectObject(&self.settings.font)?;
+
+        let rect = if paint {
+            self.hwnd.GetClientRect()?
+        } else {
+            RECT::default()
+        };
+
+        if paint {
+            let _old_pen = hdc.SelectObject(&self.settings.transparent_pen)?;
+            hdc.FillRect(rect, &self.settings.transparent_brush)?;
+            hdc.SetTextColor(self.settings.colors.foreground)?;
+            hdc.SetBkMode(co::BKMODE::TRANSPARENT)?;
+        }
+
+        // border_radius for all rectangles
+        const BORDER_RADIUS: SIZE = SIZE { cx: 10, cy: 10 };
+
+        let mut left = 0;
+
+        let focused_idx = self.workspaces.focused_idx();
+        for (idx, workspace) in self.workspaces.elements().iter().enumerate() {
+            let workspace_name = workspace.name.clone().unwrap_or((idx + 1).to_string());
+            let sz = hdc.GetTextExtentPoint32(&workspace_name)?;
+
+            if paint {
+                let text_rect = RECT {
+                    left,
+                    right: left + sz.cx + TEXT_PADDING * 2,
+                    top: 0,
+                    bottom: rect.bottom - 10,
+                };
+                hdc.DrawText(
+                    &workspace_name,
+                    text_rect,
+                    co::DT::CENTER | co::DT::VCENTER | co::DT::SINGLELINE,
+                )?;
+
+                let focused_rect = RECT {
+                    left: left + 5,
+                    right: left + sz.cx + TEXT_PADDING * 2 - 5,
+                    top: rect.bottom - 20,
+                    bottom: rect.bottom - 10,
+                };
+
+                if focused_idx == idx {
+                    let focused_brush = HBRUSH::CreateSolidBrush(self.settings.colors.focused)?;
+                    let _old_brush = hdc.SelectObject(&*focused_brush);
+                    hdc.RoundRect(focused_rect, BORDER_RADIUS)?;
+                } else {
+                    let focused_rect = RECT {
+                        left: left + 10,
+                        right: left + sz.cx + TEXT_PADDING * 2 - 10,
+                        top: rect.bottom - 20,
+                        bottom: rect.bottom - 10,
+                    };
+                    if workspace.is_empty() {
+                        let empty_brush = HBRUSH::CreateSolidBrush(self.settings.colors.empty)?;
+                        let _old_brush = hdc.SelectObject(&*empty_brush);
+                        hdc.RoundRect(focused_rect, BORDER_RADIUS)?;
+                    } else {
+                        let nonempty_brush =
+                            HBRUSH::CreateSolidBrush(self.settings.colors.nonempty)?;
+                        let _old_brush = hdc.SelectObject(&*nonempty_brush);
+                        hdc.RoundRect(focused_rect, BORDER_RADIUS)?;
+                    }
+                }
+            }
+
+            left += sz.cx + TEXT_PADDING * 2; // move left for next workspace
+        }
+
+        // we are done with the thing, now
+        if let Some(current_workspace) = self.workspaces.focused() {
+            let get_current_state = |w: &Workspace| -> String {
+                if let Some(hwnd) = komorebi_client::WindowsApi::foreground_window().ok() {
+                    if let Some(window) = w.maximized_window() {
+                        if hwnd == window.hwnd {
+                            return "Maximized".to_string();
+                        }
+                    }
+
+                    if let Some(container) = w.monocle_container() {
+                        if container.contains_window(hwnd) {
+                            return "Monocle".to_string();
+                        }
+                    }
+                }
+
+                String::new()
+            };
+
+            let current_state = get_current_state(current_workspace);
+
+            if current_state.is_empty() {
+                if matches!(
+                    current_workspace.layout,
+                    Layout::Default(DefaultLayout::Scrolling)
+                ) {
+                    log::debug!("Current workspace is in Scrolling layout");
+                    let focused_idx = current_workspace.containers.focused_idx();
+                    let total_containers = current_workspace.containers().len();
+
+                    if total_containers > 0 {
+                        let draw_small_box = |text: &String,
+                                              padding: i32,
+                                              bg_color: COLORREF,
+                                              lb: &mut i32,
+                                              v_padding: i32|
+                         -> anyhow::Result<()> {
+                            const TEXT_WIDTH: i32 = 20;
+                            if paint {
+                                let text_rect = RECT {
+                                    left: *lb,
+                                    right: *lb + TEXT_WIDTH + padding * 2,
+                                    top: rect.top + v_padding,
+                                    bottom: rect.bottom - v_padding,
+                                };
+
+                                let focused_brush = HBRUSH::CreateSolidBrush(bg_color)?;
+                                let _old_brush = hdc.SelectObject(&*focused_brush);
+                                hdc.RoundRect(text_rect, BORDER_RADIUS)?;
+                                if !text.is_empty() {
+                                    hdc.DrawText(
+                                        text,
+                                        text_rect,
+                                        co::DT::CENTER | co::DT::VCENTER | co::DT::SINGLELINE,
+                                    )?;
+                                }
+                            }
+
+                            *lb += TEXT_WIDTH + padding * 2;
+
+                            Ok(())
+                        };
+
+                        left += TEXT_PADDING;
+
+                        // if focused_idx > 1 {
+                        // we will draw 3 dots
+                        draw_small_box(
+                            &(if focused_idx > 1 {
+                                "•".to_string()
+                            } else {
+                                "".to_string()
+                            }),
+                            0,
+                            self.settings.colors.get_color_key(),
+                            &mut left,
+                            20,
+                        )?;
+                        // }
+                        // if focused_idx > 0 {
+                        draw_small_box(
+                            &(if focused_idx > 0 {
+                                (focused_idx).to_string()
+                            } else {
+                                "".to_string()
+                            }),
+                            12,
+                            if focused_idx > 0 {
+                                self.settings.colors.empty
+                            } else {
+                                self.settings.colors.get_color_key()
+                            },
+                            &mut left,
+                            16,
+                        )?;
+                        // }
+                        // if total_containers > 0 {
+                        draw_small_box(
+                            &(focused_idx + 1).to_string(),
+                            16,
+                            self.settings.colors.nonempty,
+                            &mut left,
+                            14,
+                        )?;
+                        // }
+
+                        // if focused_idx + 1 < total_containers {
+                        draw_small_box(
+                            &(if focused_idx + 1 < total_containers {
+                                (focused_idx + 2).to_string()
+                            } else {
+                                "".to_string()
+                            }),
+                            12,
+                            if focused_idx + 1 < total_containers {
+                                self.settings.colors.empty
+                            } else {
+                                self.settings.colors.get_color_key()
+                            },
+                            &mut left,
+                            16,
+                        )?;
+                        // }
+                        // if focused_idx + 2 < total_containers {
+                        // we will draw 3 dots
+                        draw_small_box(
+                            &(if focused_idx + 2 < total_containers {
+                                "•".to_string()
+                            } else {
+                                "".to_string()
+                            }),
+                            0,
+                            self.settings.colors.get_color_key(),
+                            &mut left,
+                            20,
+                        )?;
+                        // }
+                    }
+                }
+            } else {
+                let sz = hdc.GetTextExtentPoint32(&current_state)?;
+                if paint {
+                    let text_rect = RECT {
+                        left: left,
+                        right: left + sz.cx + TEXT_PADDING * 2,
+                        top: rect.top + 12,
+                        bottom: rect.bottom - 12,
+                    };
+
+                    let focused_brush =
+                        HBRUSH::CreateSolidBrush(if current_state == "Maximized" {
+                            self.settings.colors.nonempty
+                        } else {
+                            self.settings.colors.monocle
+                        })?;
+                    let _old_brush = hdc.SelectObject(&*focused_brush);
+                    hdc.RoundRect(text_rect, BORDER_RADIUS)?;
+                    hdc.DrawText(
+                        &current_state,
+                        text_rect,
+                        co::DT::CENTER | co::DT::VCENTER | co::DT::SINGLELINE,
+                    )?;
+                }
+
+                left += sz.cx + TEXT_PADDING * 2;
+            }
+        }
+
+        Ok(left)
+    }
+
     fn get_window_width(&self) -> anyhow::Result<i32> {
         let hdc = self.hwnd.GetDC()?;
-        let _old_font = hdc.SelectObject(&self.settings.font)?;
-        let width = self.workspaces.data.iter().fold(0, |acc, workspace| {
-            let sz = hdc
-                .GetTextExtentPoint32(&workspace.data.name)
-                .unwrap_or_default();
-            acc + sz.cx + TEXT_PADDING * 2 // add padding for each workspace
-        });
-
-        Ok(width)
+        self.paint_and_get_width(&*hdc, false)
     }
 
     fn resize_to_fit(&self) -> anyhow::Result<bool> {
@@ -201,7 +493,6 @@ impl Window {
         let rect = self.hwnd.GetClientRect()?;
 
         if rect.right - rect.left == total_width {
-            log::debug!("No resize needed, current width matches total width");
             return Ok(false);
         }
 
@@ -215,119 +506,33 @@ impl Window {
             co::SWP::NOACTIVATE | co::SWP::NOZORDER | co::SWP::NOMOVE | co::SWP::NOREDRAW,
         )?;
 
-        log::debug!("Finish resizing window pos");
         Ok(true)
     }
     pub fn handle_update_workspaces(
         &mut self,
-        workspaces: Vec<Workspace>,
+        workspaces: Ring<Workspace>,
     ) -> anyhow::Result<isize> {
-        log::debug!("Updating workspaces: {:?}", workspaces);
-        if self.workspaces.try_update(workspaces) {
-            if self.workspaces.name_changed() {
-                self.resize_to_fit()?;
-            }
-            self.hwnd.InvalidateRect(None, true)?;
-        }
-        // Here you can implement the logic to update the window based on the new workspaces.
-        // For example, you might want to redraw the window or update some internal state.
+        self.workspaces = workspaces;
+        self.resize_to_fit()?;
+        self.hwnd.InvalidateRect(None, true)?;
         Ok(0)
     }
 
     fn handle_create(&self) -> anyhow::Result<isize> {
         log::info!("Handling WM_CREATE message");
-        // Here you can perform any initialization needed when the window is created.
-        // For example, setting up controls or initializing resources.
         Ok(0)
     }
 
     fn handle_paint(&self) -> anyhow::Result<isize> {
-        log::info!("Handling WM_PAINT message");
-
+        log::debug!("Handling WM_PAINT message...");
         let hdc = self.hwnd.BeginPaint()?;
-
-        let rect = self.hwnd.GetClientRect()?;
-
-        let _old_pen = hdc.SelectObject(&self.settings.transparent_pen)?;
-
-        hdc.SetTextColor(self.settings.colors.foreground)?;
-        hdc.SetBkMode(co::BKMODE::TRANSPARENT)?;
-        let _old_font = hdc.SelectObject(&self.settings.font)?;
-
-        // let name_changed = self.workspaces.name_changed();
-        let name_changed = true;
-        
-        let mut left = 0;
-        for workspace in &self.workspaces.data {
-            let sz = hdc.GetTextExtentPoint32(&workspace.data.name)?;
-            if name_changed {
-                let text_rect = RECT {
-                    left,
-                    right: left + sz.cx + TEXT_PADDING * 2,
-                    top: 0,
-                    bottom: rect.bottom - 10,
-                };
-
-                hdc.FillRect(text_rect, &self.settings.transparent_brush)?;
-
-                hdc.DrawText(
-                    &workspace.data.name,
-                    text_rect,
-                    co::DT::CENTER | co::DT::VCENTER | co::DT::SINGLELINE,
-                )?;
-            }
-
-            let clear_rect = RECT {
-                left,
-                right: left + sz.cx + TEXT_PADDING * 2,
-                top: rect.bottom - 20,
-                bottom: rect.bottom,
-            };
-
-            let focused_rect = RECT {
-                left: left + 5,
-                right: left + sz.cx + TEXT_PADDING * 2 - 5,
-                top: rect.bottom - 20,
-                bottom: rect.bottom - 10,
-            };
-
-            let border_radius = SIZE { cx: 10, cy: 10 };
-
-            if name_changed || workspace.state_changed {
-                hdc.FillRect(clear_rect, &self.settings.transparent_brush)?;
-
-                match workspace.data.state {
-                    WorkspaceState::Focused => {
-                        let focused_brush = HBRUSH::CreateSolidBrush(self.settings.colors.focused)?;
-                        let _old_brush = hdc.SelectObject(&*focused_brush);
-                        hdc.RoundRect(focused_rect, border_radius)?;
-                    }
-                    WorkspaceState::NonEmpty => {
-                        let focused_rect = RECT {
-                            left: left + 10,
-                            right: left + sz.cx + TEXT_PADDING * 2 - 10,
-                            top: rect.bottom - 20,
-                            bottom: rect.bottom - 10,
-                        };
-                        let nonempty_brush = HBRUSH::CreateSolidBrush(self.settings.colors.nonempty)?;
-                        let _old_brush = hdc.SelectObject(&*nonempty_brush);
-                        hdc.RoundRect(focused_rect, border_radius)?;
-                    }
-                    WorkspaceState::Empty => {
-                        // No special drawing for empty workspaces
-                    }
-                }
-            }
-
-            left += sz.cx + TEXT_PADDING * 2; // move left for next workspace
-        }
-
-        log::info!("WM_PAINT event processed. Workspaces redrawn.");
+        self.paint_and_get_width(&*hdc, true)?;
+        log::debug!("WM_PAINT handled.");
         Ok(0)
     }
 
     fn cleanup(&mut self) {
-        self.hwnd = HWND::NULL; // Clear the HWND to prevent dangling references
+        self.hwnd = HWND::NULL; 
     }
 
     pub fn run_loop(&self) -> anyhow::Result<()> {
@@ -354,31 +559,36 @@ impl Window {
         let taskbar_atom = AtomStr::from_str("Shell_TrayWnd");
         let taskbar = HWND::FindWindow(Some(taskbar_atom), None)?
             .ok_or(anyhow::anyhow!("Taskbar not found"))?;
-
-        taskbar.EnumChildWindows(|c| {
-            log::info!("Child window: {:?}", c.GetClassName());
-            true
-        });
+        log::debug!("Taskbar HWND found: {:#?}", taskbar);
 
         let rect = taskbar.GetClientRect()?;
+        log::debug!(
+            "Taskbar rect: {} {} {} {}",
+            rect.left,
+            rect.top,
+            rect.right,
+            rect.bottom
+        );
 
         self.create_window(
             atom,
-            POINT { 
-                x: 15, 
-                y: 0 
-            },
+            POINT { x: 15, y: 0 },
             SIZE {
                 cx: self.get_window_width()?,
-                cy: rect.bottom - rect.top, // Set initial size
+                cy: rect.bottom - rect.top, 
             },
             &hinstance,
         )?;
 
+        log::debug!("Window created, setting parent to taskbar");
+
         self.hwnd.SetParent(&taskbar)?;
 
-        self.hwnd
-            .SetLayeredWindowAttributes(self.settings.colors.get_color_key(), 0, co::LWA::COLORKEY)?;
+        self.hwnd.SetLayeredWindowAttributes(
+            self.settings.colors.get_color_key(),
+            0,
+            co::LWA::COLORKEY,
+        )?;
 
         Ok(())
     }

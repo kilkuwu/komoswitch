@@ -10,6 +10,8 @@ pub const TRANSPARENCY_KEY_LIGHT: COLORREF = COLORREF::from_rgb(255, 255, 255);
 pub struct ColorSettings {
     pub nonempty: COLORREF,
     pub focused: COLORREF,
+    pub empty: COLORREF,
+    pub monocle: COLORREF,
     pub foreground: COLORREF,
 }
 
@@ -51,9 +53,16 @@ impl ColorSettings {
             true => COLORREF::from_rgb(150, 150, 150),
             false => COLORREF::from_rgb(100, 100, 100), // green for non-empty workspaces in dark mode
         };
+
+        let empty = match is_light_mode {
+            true => COLORREF::from_rgb(200, 200, 200), // light gray for empty workspaces in light mode
+            false => COLORREF::from_rgb(50, 50, 50),  // dark gray for empty workspaces in dark mode
+        };
         Ok(Self {
             nonempty,
             focused,
+            empty,
+            monocle: COLORREF::from_rgb(225, 21, 123), // gold for monocle workspace
             foreground,
         })
     }
@@ -97,12 +106,10 @@ impl Settings {
 
 impl Drop for Settings {
     fn drop(&mut self) {
-        log::debug!("Dropping Settings resources");
         unsafe {
             assert!(DeleteObject(HGDIOBJ(self.font.ptr())) != false);
             assert!(DeleteObject(HGDIOBJ(self.transparent_brush.ptr())) != false);
             assert!(DeleteObject(HGDIOBJ(self.transparent_pen.ptr())) != false);
         }
-        log::debug!("Dropping Settings successfully");
     }
 }

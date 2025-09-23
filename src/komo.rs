@@ -3,52 +3,52 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::Context;
-use komorebi_client::{
-    Notification, NotificationEvent, SocketMessage, State, SubscribeOptions, WindowManagerEvent,
-};
+use komorebi_client::{Notification, Ring, SocketMessage, State, SubscribeOptions, Workspace};
 use winsafe::HWND;
 
 use crate::msgs::UpdateWorkspaces;
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum WorkspaceState {
-    Empty,
-    NonEmpty,
-    Focused,
-}
+// #[derive(Debug, Clone, PartialEq)]
+// pub enum WorkspaceState {
+//     Empty,
+//     NonEmpty,
+//     Focused,
+// }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Workspace {
-    pub name: String,
-    // pub idx: usize,
-    pub state: WorkspaceState,
-}
+// #[derive(Debug, Clone, PartialEq)]
+// pub struct Workspace {
+//     pub workspace: komorebi_client::Workspace,
+//     pub state: WorkspaceState,
+// }
 
-fn workspaces_from_state(state: State) -> anyhow::Result<Vec<Workspace>> {
+fn workspaces_from_state(
+    state: State,
+) -> anyhow::Result<Ring<Workspace>> {
     let monitor = state.monitors.focused().context("No focused monintor?")?;
 
-    let focused_workspace = monitor.focused_workspace_idx();
+    // let focused_workspace = monitor.focused_workspace_idx();
 
-    let workspaces = monitor.workspaces().iter().enumerate().map(|(idx, w)| {
-        let name = w.name.clone().unwrap_or_else(|| (idx + 1).to_string());
-        let state = if focused_workspace == idx {
-            WorkspaceState::Focused
-        } else if w.is_empty() {
-            WorkspaceState::Empty
-        } else {
-            WorkspaceState::NonEmpty
-        };
-        Workspace {
-            name,
-            // idx,
-            state,
-        }
-    });
+    Ok(monitor.workspaces.clone())
 
-    Ok(workspaces.collect())
+    // let workspaces = monitor.workspaces().iter().enumerate()
+    // .map(|(idx, w)| {
+    //     let state = if focused_workspace == idx {
+    //         WorkspaceState::Focused
+    //     } else if w.is_empty() {
+    //         WorkspaceState::Empty
+    //     } else {
+    //         WorkspaceState::NonEmpty
+    //     };
+    //     Workspace {
+    //         workspace: w.clone(),
+    //         state,
+    //     }
+    // });
+
+    // Ok(workspaces.collect())
 }
 
-pub fn read_workspaces() -> anyhow::Result<Vec<Workspace>> {
+pub fn read_workspaces() -> anyhow::Result<Ring<Workspace>> {
     log::debug!("Reading komorebi workspaces");
     let response = komorebi_client::send_query(&SocketMessage::State)?;
     let state: State = serde_json::from_str(&response)?;
@@ -120,8 +120,7 @@ pub fn start_listen_for_workspaces(hwnd: HWND) -> anyhow::Result<JoinHandle<()>>
             log::debug!("Read {} bytes from komorebi", buffer.len());
 
             let notification_str = match String::from_utf8(buffer) {
-                Ok(notification_str) => 
-                    notification_str,
+                Ok(notification_str) => notification_str,
                 Err(e) => {
                     log::error!("Failed to parse komorebi notification string as utf8: {e}");
                     continue;
@@ -136,20 +135,12 @@ pub fn start_listen_for_workspaces(hwnd: HWND) -> anyhow::Result<JoinHandle<()>>
                 }
             };
 
-            log::info!("Received notification from komorebi: {:?}", notification.event);
+            log::info!(
+                "Received notification from komorebi: {:?}",
+                notification.event
+            );
 
-            let should_update = match notification.event {
-                NotificationEvent::Socket(notif) if should_update_sm(&notif) => true,
-                NotificationEvent::WindowManager(notif) if should_update_wme(&notif) => true,
-                _ => false,
-            };
-
-            log::debug!("Should update: {}", should_update);
-
-            if !should_update {
-                log::debug!("Skipping update for this notification");
-                continue;
-            }
+            // Always update because we have filtered state changes
 
             let new_workspaces = match workspaces_from_state(notification.state) {
                 Ok(workspaces) => workspaces,
@@ -171,49 +162,4 @@ pub fn start_listen_for_workspaces(hwnd: HWND) -> anyhow::Result<JoinHandle<()>>
     });
 
     Ok(handle)
-}
-
-fn should_update_wme(notif: &WindowManagerEvent) -> bool {
-    matches!(
-        notif,
-        WindowManagerEvent::Cloak(..)
-            | WindowManagerEvent::Uncloak(..)
-            | WindowManagerEvent::Destroy(..) // | WindowManagerEvent::FocusChange(..)
-                                              // | WindowManagerEvent::Hide(..)
-    )
-}
-
-fn should_update_sm(notif: &SocketMessage) -> bool {
-    matches!(
-        notif,
-        SocketMessage::FocusWorkspaceNumber(_)
-            | SocketMessage::FocusMonitorNumber(_)
-            | SocketMessage::FocusMonitorWorkspaceNumber(..)
-            | SocketMessage::FocusNamedWorkspace(_)
-            | SocketMessage::FocusWorkspaceNumbers(_)
-            | SocketMessage::CycleFocusMonitor(_)
-            | SocketMessage::CycleFocusWorkspace(_)
-            | SocketMessage::ReloadConfiguration
-            | SocketMessage::ReplaceConfiguration(_)
-            | SocketMessage::CompleteConfiguration
-            | SocketMessage::ReloadStaticConfiguration(_)
-            | SocketMessage::MoveContainerToMonitorNumber(_)
-            | SocketMessage::MoveContainerToMonitorWorkspaceNumber(..)
-            | SocketMessage::MoveContainerToNamedWorkspace(_)
-            | SocketMessage::MoveContainerToWorkspaceNumber(_)
-            | SocketMessage::MoveWorkspaceToMonitorNumber(_)
-            | SocketMessage::CycleMoveContainerToMonitor(_)
-            | SocketMessage::CycleMoveContainerToWorkspace(_)
-            | SocketMessage::CycleMoveWorkspaceToMonitor(_)
-            | SocketMessage::CloseWorkspace
-            | SocketMessage::SendContainerToMonitorNumber(_)
-            | SocketMessage::SendContainerToMonitorWorkspaceNumber(..)
-            | SocketMessage::SendContainerToNamedWorkspace(_)
-            | SocketMessage::SendContainerToWorkspaceNumber(_)
-            | SocketMessage::CycleSendContainerToMonitor(_)
-            | SocketMessage::CycleSendContainerToWorkspace(_) // | SocketMessage::Hide(_)
-                                                              // | SocketMessage::Minimize(_)
-                                                              // | SocketMessage::Show(_)
-                                                              // | SocketMessage::TitleUpdate(_)
-    )
 }

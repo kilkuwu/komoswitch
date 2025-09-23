@@ -9,15 +9,15 @@ use crate::{komo::start_listen_for_workspaces, window::Window};
 
 mod komo;
 mod window;
-mod workspaces;
 mod msgs;
 
 fn begin_execution() -> anyhow::Result<()> {
     log::info!("Starting execution...");
     // Here you can add any initialization code needed before the main loop starts.
     let mut window = Window::new()?;
-
+    log::debug!("Window created.");
     window.prepare()?;
+    log::debug!("Window prepared.");
 
     let hwnd = unsafe { window.hwnd.raw_copy() };
     start_listen_for_workspaces(hwnd)?;
